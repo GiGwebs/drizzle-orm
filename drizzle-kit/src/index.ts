@@ -8,6 +8,7 @@ import type { mysqlCredentials } from './cli/validations/mysql';
 import type {
 	awsDataApiCredentials,
 	dsqlCredentials,
+	minipgClientCredentials,
 	pgDefaultCredentials,
 	pgLiteClientCredentials,
 	pgLiteCredentials,
@@ -158,7 +159,9 @@ export interface DialectDriverMap extends Record<Dialect, Driver | 'default'> {
 export interface DialectCredentials {
 	turso: { default: { dbCredentials: TypeOf<typeof libSQLCredentials> } };
 	postgresql: {
-		default: { dbCredentials: ExclusiveUnion<TypeOf<typeof pgDefaultCredentials>> };
+		default: {
+			dbCredentials: ExclusiveUnion<TypeOf<typeof pgDefaultCredentials> | TypeOf<typeof minipgClientCredentials>>;
+		};
 		'aws-data-api': { dbCredentials: TypeOf<typeof awsDataApiCredentials> };
 		pglite: ExclusiveUnion<
 			| {

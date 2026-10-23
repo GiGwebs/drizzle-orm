@@ -144,9 +144,6 @@ importers:
       '@drizzle-team/brocli':
         specifier: 0.12.1
         version: 0.12.1
-      '@drizzle-team/minipg':
-        specifier: workspace:*
-        version: link:../minipg
       '@duckdb/node-api':
         specifier: 1.5.0-r.1
         version: 1.5.0-r.1

@@ -338,6 +338,8 @@ export const drizzleForPostgres = async (
 		}
 	} else if ('url' in credentials) {
 		dbUrl = credentials.url;
+	} else if ('client' in credentials) {
+		dbUrl = 'minipg://custom-client';
 	} else {
 		dbUrl =
 			`postgresql://${credentials.user}:${credentials.password}@${credentials.host}:${credentials.port}/${credentials.database}`;

@@ -1,9 +1,9 @@
 /// <reference types="@cloudflare/workers-types" />
-import type { Decoder } from '@drizzle-team/minipg';
 import type { SQLiteCloudRowset } from '@sqlitecloud/drivers';
 import { DrizzleQueryError, is } from 'drizzle-orm';
 import type { AwsDataApiSessionOptions } from 'drizzle-orm/aws-data-api/pg';
 import type { MigrationConfig, MigratorInitFailResponse } from 'drizzle-orm/migrator';
+import type { Decoder, Pool } from 'drizzle-orm/minipg';
 import type { PreparedQueryConfig } from 'drizzle-orm/pg-core';
 import type { SqliteProxyExecutors } from 'drizzle-orm/sqlite-proxy';
 import type { config } from 'mssql';
@@ -19,7 +19,12 @@ import type { DB, Proxy, SQLiteDB } from '../utils';
 import { normaliseSQLiteUrl } from '../utils/utils-node';
 import { JSONB } from '../utils/when-json-met-bigint';
 import type { ProxyParams } from './commands/studio';
-import { ConnectionStringDatabaseCliError, DatabaseDriverCliError, RequiredEitherPackagesCliError } from './errors';
+import {
+	ConfigConnectionCliError,
+	ConnectionStringDatabaseCliError,
+	DatabaseDriverCliError,
+	RequiredEitherPackagesCliError,
+} from './errors';
 import { assertPackages, checkPackage, QueryError } from './utils';
 import type { DuckDbCredentials } from './validations/duckdb';
 import type { LibSQLCredentials } from './validations/libsql';
@@ -29,7 +34,7 @@ import { withStyle } from './validations/outputs';
 import type { PostgresCredentials } from './validations/postgres';
 import type { SingleStoreCredentials } from './validations/singlestore';
 import type { SqliteCredentials } from './validations/sqlite';
-import { humanLog } from './views';
+import { error, humanLog } from './views';
 
 const ms = (a: bigint, b: bigint) => Number(b - a) / 1_000_000;
 
@@ -39,6 +44,49 @@ const normalisePGliteUrl = (it: string) => {
 	}
 
 	return it;
+};
+
+const prepareMinipgDB = async (client: Pool) => {
+	const { drizzle } = await import('drizzle-orm/postgres');
+	const { migrate } = await import('drizzle-orm/postgres/migrator');
+
+	const db = drizzle({ client });
+	const migrateFn = async (config: MigrationConfig) => {
+		return migrate(db, config);
+	};
+
+	const query = async (sql: string, params?: any[]) => {
+		const result = await client.query(sql, params ?? [], { mode: 'object' }).catch((e) => {
+			throw new QueryError(e, sql, params || []);
+		});
+		return result.rows as any[];
+	};
+
+	const proxy: Proxy = async (params) => {
+		const result = await client.query(params.sql, params.params ?? [], {
+			mode: params.mode === 'array' ? 'array' : 'object',
+		}).catch((e) => {
+			throw new QueryError(e, params.sql, params.params || []);
+		});
+		return result.rows;
+	};
+
+	const transactionProxy: TransactionProxy = async (queries) => {
+		const results: any[] = [];
+		try {
+			await client.transaction(async (tx) => {
+				for (const query of queries) {
+					const result = await tx.query(query.sql, [], { mode: 'object' });
+					results.push(result.rows);
+				}
+			});
+		} catch (error) {
+			results.push(error as Error);
+		}
+		return results;
+	};
+
+	return { packageName: '@drizzle-team/minipg' as const, query, proxy, transactionProxy, migrate: migrateFn };
 };
 
 export const preparePostgresDB = async (
@@ -149,9 +197,9 @@ export const preparePostgresDB = async (
 				};
 			}
 
-			if (await checkPackage('@drizzle-team/minipg')) {
-				humanLog(withStyle.info(`Using '@drizzle-team/minipg' driver for database querying`));
-				const { createPool } = await import('@drizzle-team/minipg/aurora');
+			if (await checkPackage('drizzle-orm/minipg')) {
+				humanLog(withStyle.info(`Using 'drizzle-orm/minipg' driver for database querying`));
+				const { createPool } = await import('drizzle-orm/minipg/aurora');
 				const { drizzle } = await import('drizzle-orm/postgres/aurora');
 				const { migrate } = await import('drizzle-orm/postgres/aurora/migrator');
 
@@ -219,7 +267,11 @@ export const preparePostgresDB = async (
 				};
 			}
 
-			throw new RequiredEitherPackagesCliError(['@aws-sdk/client-rds-data', '@drizzle-team/minipg']);
+			throw new DatabaseDriverCliError(
+				'postgresql',
+				['@aws-sdk/client-rds-data', 'drizzle-orm'],
+				"No AWS Data API driver was found, and the installed 'drizzle-orm' does not include the bundled minipg driver ('drizzle-orm/minipg')\nTo connect through AWS Data API - please upgrade 'drizzle-orm', or install '@aws-sdk/client-rds-data'",
+			);
 		}
 
 		if (driver === 'pglite') {
@@ -496,6 +548,28 @@ export const preparePostgresDB = async (
 		}
 
 		assertUnreachable(driver);
+	}
+
+	if ('client' in credentials) {
+		if (!(await checkPackage('drizzle-orm/minipg'))) {
+			throw new DatabaseDriverCliError(
+				'postgresql',
+				['drizzle-orm'],
+				"The installed 'drizzle-orm' does not include the bundled minipg driver ('drizzle-orm/minipg'), so Drizzle Kit cannot use 'dbCredentials.client'\nTo pass a minipg Pool as 'dbCredentials.client' - please upgrade 'drizzle-orm'",
+			);
+		}
+		const { Pool } = await import('drizzle-orm/minipg');
+		if (!(credentials.client instanceof Pool)) {
+			throw new ConfigConnectionCliError(
+				'postgresql',
+				['client'],
+				error(
+					`dbCredentials.client is not a minipg Pool. Pass a Pool from '@drizzle-team/minipg' or 'drizzle-orm/minipg' as 'dbCredentials.client'`,
+				),
+			);
+		}
+		humanLog(withStyle.info(`Using the minipg pool from dbCredentials.client for database querying`));
+		return prepareMinipgDB(credentials.client);
 	}
 
 	if (await checkPackage('pg')) {
@@ -1080,10 +1154,8 @@ export const preparePostgresDB = async (
 		return { packageName: 'bun', query, proxy, transactionProxy, migrate: migrateFn };
 	}
 
-	if (await checkPackage('@drizzle-team/minipg')) {
-		const { createPool, parseConnectionString } = await import('@drizzle-team/minipg');
-		const { drizzle } = await import('drizzle-orm/postgres');
-		const { migrate } = await import('drizzle-orm/postgres/migrator');
+	if (await checkPackage('drizzle-orm/minipg')) {
+		const { createPool, parseConnectionString } = await import('drizzle-orm/minipg');
 
 		const ssl = 'ssl' in credentials
 			? credentials.ssl === 'prefer'
@@ -1116,55 +1188,19 @@ export const preparePostgresDB = async (
 		const isNeon = !!host && /\.neon\.tech$/i.test(host);
 
 		humanLog(
-			withStyle.info(`Using '@drizzle-team/minipg'${isNeon ? ' (neon-ws)' : ''} driver for database querying`),
+			withStyle.info(`Using 'drizzle-orm/minipg'${isNeon ? ' (neon-ws)' : ''} driver for database querying`),
 		);
 		const client = isNeon
-			? (await import('@drizzle-team/minipg/neon-ws')).createPool({ ...config, webSocketConstructor: ws })
+			? (await import('drizzle-orm/minipg/neon-ws')).createPool({ ...config, webSocketConstructor: ws })
 			: createPool(config);
 
-		const db = drizzle({ client });
-		const migrateFn = async (config: MigrationConfig) => {
-			return migrate(db, config);
-		};
-
-		const query = async (sql: string, params?: any[]) => {
-			const result = await client.query(sql, params ?? [], { mode: 'object' }).catch((e) => {
-				throw new QueryError(e, sql, params || []);
-			});
-			return result.rows as any[];
-		};
-
-		const proxy: Proxy = async (params) => {
-			const result = await client.query(params.sql, params.params ?? [], {
-				mode: params.mode === 'array' ? 'array' : 'object',
-			}).catch((e) => {
-				throw new QueryError(e, params.sql, params.params || []);
-			});
-			return result.rows;
-		};
-
-		const transactionProxy: TransactionProxy = async (queries) => {
-			const results: any[] = [];
-			try {
-				await client.transaction(async (tx) => {
-					for (const query of queries) {
-						const result = await tx.query(query.sql, [], { mode: 'object' });
-						results.push(result.rows);
-					}
-				});
-			} catch (error) {
-				results.push(error as Error);
-			}
-			return results;
-		};
-
-		return { packageName: '@drizzle-team/minipg', query, proxy, transactionProxy, migrate: migrateFn };
+		return prepareMinipgDB(client);
 	}
 
 	throw new DatabaseDriverCliError(
 		'postgresql',
-		['pg', 'postgres', 'bun', '@neondatabase/serverless', '@vercel/postgres', '@drizzle-team/minipg'],
-		"To connect to Postgres database - please install either of 'pg', 'postgres', 'bun', '@neondatabase/serverless', '@vercel/postgres' or '@drizzle-team/minipg' drivers\nFor the 'bun' driver, run your script using: bun --bun",
+		['pg', 'postgres', 'bun', '@neondatabase/serverless', '@vercel/postgres', 'drizzle-orm'],
+		"No Postgres driver was found, and the installed 'drizzle-orm' does not include the bundled minipg driver ('drizzle-orm/minipg')\nTo connect to Postgres database - please upgrade 'drizzle-orm', or install either of 'pg', 'postgres', 'bun', '@neondatabase/serverless' or '@vercel/postgres' drivers\nFor the 'bun' driver, run your script using: bun --bun",
 		"For the 'bun' driver, run your script using: bun --bun",
 	);
 };

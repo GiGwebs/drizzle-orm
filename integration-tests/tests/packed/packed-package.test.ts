@@ -10,6 +10,7 @@ import { createTestHarness } from 'wrangler';
 const exec = promisify(execFile);
 
 const ormDist = resolve(import.meta.dirname, '../../../drizzle-orm/dist');
+const kitDist = resolve(import.meta.dirname, '../../../drizzle-kit/dist');
 const minipgDir = resolve(import.meta.dirname, '../../../minipg');
 const instanceofScript = resolve(import.meta.dirname, 'instanceof.js');
 const tsc = createRequire(import.meta.url).resolve('typescript/bin/tsc');
@@ -142,11 +143,8 @@ function requireMinipgBuild() {
 	}
 }
 
-describe.skipIf(!hasPostgres)('packed drizzle-orm with standalone @drizzle-team/minipg', () => {
-	const consumer = useConsumer('consumer', async (dir) => {
-		requireMinipgBuild();
-		return [await pack(ormDist, dir), await pack(minipgDir, dir)];
-	});
+describe.skipIf(!hasPostgres)('packed drizzle-orm with its bundled copy of minipg', () => {
+	const consumer = useConsumer('consumer', async (dir) => [await pack(ormDist, dir)]);
 
 	test.for(Object.keys(runtimes))('drizzle-orm/postgres runs a query under %s', async (runtime) => {
 		const output = await runtimes[runtime]!(consumer());
@@ -158,6 +156,106 @@ describe.skipIf(!hasPostgres)('packed drizzle-orm with standalone @drizzle-team/
 			const output = await runScript(requireNodeBinaries[version]!, ['require.cjs'], consumer());
 			expect(JSON.parse(output)).toEqual([{ value: 'ok' }]);
 		});
+	});
+
+	test('drizzle-orm/minipg and its subpaths expose the bundled copy', async () => {
+		const output = await runScript('node', ['minipg.js'], consumer());
+		expect(JSON.parse(output)).toEqual({
+			isPgError: true,
+			code: '22012',
+			point: { type: 'Point', coordinates: [1, 2] },
+		});
+	});
+
+	test('drizzle-orm/minipg/package.json gives the version of the bundled copy', async () => {
+		const { version } = JSON.parse(readFileSync(join(minipgDir, 'package.json'), 'utf8'));
+		const required = await runScript('node', ['-p', `require('drizzle-orm/minipg/package.json').version`], consumer());
+		const imported = await runScript('node', [
+			'--input-type=module',
+			'-e',
+			`import manifest from 'drizzle-orm/minipg/package.json' with { type: 'json' }; console.log(manifest.version);`,
+		], consumer());
+		expect({ required: required.trim(), imported: imported.trim() }).toEqual({ required: version, imported: version });
+	});
+});
+
+async function pushAndPull(cwd: string, node: string, config = 'drizzle.config.ts') {
+	const kit = join(cwd, 'node_modules/drizzle-kit/bin.cjs');
+	await runScript(node, ['reset.js'], cwd);
+	rmSync(join(cwd, 'drizzle'), { recursive: true, force: true });
+	const push = await runScript(node, [kit, 'push', '--config', config], cwd);
+	const pull = await runScript(node, [kit, 'pull', '--config', config], cwd);
+	return { push, pull, pulledSchema: readFileSync(join(cwd, 'drizzle/schema.ts'), 'utf8') };
+}
+
+describe.skipIf(!hasPostgres)('packed drizzle-kit with packed drizzle-orm and no other driver', () => {
+	const consumer = useConsumer('kit-consumer', async (dir) => [await pack(ormDist, dir), await pack(kitDist, dir)]);
+
+	function expectMinipgPushAndPull({ push, pull, pulledSchema }: Awaited<ReturnType<typeof pushAndPull>>) {
+		expect(push).toContain(`Using 'drizzle-orm/minipg' driver`);
+		expect(pull).toContain(`Using 'drizzle-orm/minipg' driver`);
+		expect(pulledSchema).toContain('packed_kit');
+		expect(pulledSchema).toContain('users');
+	}
+
+	test('the standalone @drizzle-team/minipg is not installed', () => {
+		expect(existsSync(join(consumer(), 'node_modules/@drizzle-team/minipg'))).toBe(false);
+	});
+
+	test('drizzle-kit push and pull connect through drizzle-orm/minipg', async () => {
+		expectMinipgPushAndPull(await pushAndPull(consumer(), 'node'));
+	});
+
+	describe.skipIf(!hasRequireNodeBinaries)('require()', () => {
+		test.for(Object.keys(requireNodeBinaries))('drizzle-kit push and pull run under Node %s', async (version) => {
+			expectMinipgPushAndPull(await pushAndPull(consumer(), requireNodeBinaries[version]!));
+		});
+	});
+});
+
+describe.skipIf(!hasPostgres)('packed drizzle-kit with a standalone minipg pool as dbCredentials.client', () => {
+	const consumer = useConsumer('kit-consumer', async (dir) => {
+		requireMinipgBuild();
+		return [await pack(ormDist, dir), await pack(kitDist, dir), await pack(minipgDir, dir)];
+	});
+
+	test('drizzle-kit push and pull query through the pool from dbCredentials.client', async () => {
+		const { push, pull, pulledSchema } = await pushAndPull(consumer(), 'node', 'client.config.ts');
+		expect(push).toContain('Using the minipg pool from dbCredentials.client');
+		expect(pull).toContain('Using the minipg pool from dbCredentials.client');
+		expect(push).not.toContain(`Using 'drizzle-orm/minipg' driver`);
+		expect(pulledSchema).toContain('packed_kit');
+		expect(pulledSchema).toContain('users');
+	});
+});
+
+describe.skipIf(!hasPostgres)('packed drizzle-orm with the standalone @drizzle-team/minipg as client', () => {
+	const consumer = useConsumer(
+		'standalone-consumer',
+		async (dir) => {
+			requireMinipgBuild();
+			cpSync(instanceofScript, join(dir, 'instanceof.js'));
+			return [await pack(ormDist, dir), await pack(minipgDir, dir)];
+		},
+		// A user installs the standalone package to get a newer release than the bundled copy.
+		{ '@drizzle-team/minipg': '999.0.0' },
+	);
+
+	test('a standalone pool runs a query and a batch', async () => {
+		const output = await runScript('node', ['standalone.ts'], consumer());
+		expect(JSON.parse(output)).toEqual({
+			query: [{ value: 'ok' }],
+			batch: [[{ value: 1 }], [{ value: 2 }]],
+		});
+	});
+
+	test('a standalone pool type-checks as client', async () => {
+		expect(await typeCheck('standalone.ts', consumer())).toBe('');
+	});
+
+	test('instanceof works in both directions between the bundled copy and the standalone package', async () => {
+		const output = await runScript('node', ['instanceof.js', 'drizzle-orm/minipg', '@drizzle-team/minipg'], consumer());
+		expect(JSON.parse(output)).toEqual(instanceofInBothDirections);
 	});
 });
 

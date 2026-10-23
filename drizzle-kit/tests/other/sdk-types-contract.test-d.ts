@@ -1,6 +1,7 @@
 import type { PGlite } from '@electric-sql/pglite';
+import type { Pool } from 'drizzle-orm/minipg';
 import { expectTypeOf, test } from 'vitest';
-import type { Config } from '../../src';
+import { type Config, defineConfig } from '../../src';
 import type {
 	CheckOptions,
 	ExportOptions,
@@ -54,4 +55,18 @@ test('Config accepts a pglite client instead of dbCredentials', () => {
 		driver: 'pglite';
 		client: PGlite;
 	}>().toMatchTypeOf<Config>();
+});
+
+declare const pool: Pool;
+
+test('defineConfig accepts a minipg Pool as dbCredentials.client', () => {
+	defineConfig({ dialect: 'postgresql', dbCredentials: { client: pool } });
+});
+
+test('defineConfig rejects dbCredentials.client combined with url', () => {
+	defineConfig({
+		dialect: 'postgresql',
+		// @ts-expect-error
+		dbCredentials: { client: pool, url: 'postgres://localhost:5432/db' },
+	});
 });
