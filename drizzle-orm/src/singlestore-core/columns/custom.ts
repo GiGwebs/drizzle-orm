@@ -66,6 +66,7 @@ export class SingleStoreCustomColumn<T extends ColumnBaseConfig<'custom', 'Singl
 	private sqlName: string;
 	private mapTo?: (value: T['data']) => T['driverParam'];
 	private mapFrom?: (value: T['driverParam']) => T['data'];
+	private selectFromDb?: (field: SQL) => SQL;
 
 	constructor(
 		table: AnySingleStoreTable<{ name: T['tableName'] }>,
@@ -75,6 +76,7 @@ export class SingleStoreCustomColumn<T extends ColumnBaseConfig<'custom', 'Singl
 		this.sqlName = config.customTypeParams.dataType(config.fieldConfig);
 		this.mapTo = config.customTypeParams.toDriver;
 		this.mapFrom = config.customTypeParams.fromDriver;
+		this.selectFromDb = config.customTypeParams.selectFromDb;
 	}
 
 	getSQLType(): string {
@@ -87,6 +89,11 @@ export class SingleStoreCustomColumn<T extends ColumnBaseConfig<'custom', 'Singl
 
 	override mapToDriverValue(value: T['data']): T['driverParam'] {
 		return typeof this.mapTo === 'function' ? this.mapTo(value) : value as T['data'];
+	}
+
+	/** @internal */
+	getSelectSQL(field: SQL): SQL | undefined {
+		return typeof this.selectFromDb === 'function' ? this.selectFromDb(field) : undefined;
 	}
 }
 
@@ -198,6 +205,23 @@ export interface CustomTypeParams<T extends CustomTypeValues> {
 	 * ```
 	 */
 	fromDriver?: (value: T['driverData']) => T['data'];
+
+	/**
+	 * Optional function, that is responsible for mapping the column to a custom SQL expression in select queries
+	 *
+	 * The `field` argument is the column reference as it would be emitted in the query.
+	 * The returned expression is aliased back to the column name, so `fromDriver` decoding works as usual
+	 *
+	 * For example, when using a spatial column you can wrap the column
+	 * into `ST_AsText` to select its text representation
+	 * @example
+	 * ```
+	 * selectFromDb(field) {
+	 * 	return sql`ST_AsText(${field})`;
+	 * },
+	 * ```
+	 */
+	selectFromDb?: (field: SQL) => SQL;
 }
 
 /**

@@ -20,7 +20,7 @@ import {
 import type { Name, Placeholder } from '~/sql/index.ts';
 import { and, eq } from '~/sql/index.ts';
 import { Param, type QueryWithTypings, SQL, sql, type SQLChunk } from '~/sql/sql.ts';
-import { SQLiteColumn } from '~/sqlite-core/columns/index.ts';
+import { SQLiteColumn, SQLiteCustomColumn } from '~/sqlite-core/columns/index.ts';
 import type {
 	AnySQLiteSelectQueryBuilder,
 	SQLiteDeleteConfig,
@@ -209,7 +209,17 @@ export abstract class SQLiteDialect {
 				}
 			} else if (is(field, Column)) {
 				const tableName = field.table[Table.Symbol.Name];
-				if (field.columnType === 'SQLiteNumericBigInt') {
+				const selectSQL = is(field, SQLiteCustomColumn)
+					? field.getSelectSQL(
+						isSingleTable
+							? sql`${sql.identifier(this.casing.getColumnCasing(field))}`
+							: sql`${sql.identifier(tableName)}.${sql.identifier(this.casing.getColumnCasing(field))}`,
+					)
+					: undefined;
+
+				if (selectSQL !== undefined) {
+					chunk.push(sql`${selectSQL} as ${sql.identifier(this.casing.getColumnCasing(field))}`);
+				} else if (field.columnType === 'SQLiteNumericBigInt') {
 					if (isSingleTable) {
 						chunk.push(
 							sql`cast(${sql.identifier(this.casing.getColumnCasing(field))} as text)`,
@@ -838,7 +848,10 @@ export abstract class SQLiteDialect {
 			let field = sql`json_array(${
 				sql.join(
 					selection.map(({ field }) =>
-						is(field, SQLiteColumn)
+						is(field, SQLiteCustomColumn)
+							? field.getSelectSQL(sql`${sql.identifier(this.casing.getColumnCasing(field))}`)
+								?? sql.identifier(this.casing.getColumnCasing(field))
+							: is(field, SQLiteColumn)
 							? sql.identifier(this.casing.getColumnCasing(field))
 							: is(field, SQL.Aliased)
 							? field.sql

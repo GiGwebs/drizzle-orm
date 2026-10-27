@@ -24,6 +24,7 @@ import { getTableName, getTableUniqueName, Table } from '~/table.ts';
 import { type Casing, orderSelectedFields, type UpdateSet } from '~/utils.ts';
 import { ViewBaseConfig } from '~/view-common.ts';
 import { MySqlColumn } from './columns/common.ts';
+import { MySqlCustomColumn } from './columns/custom.ts';
 import type { MySqlDeleteConfig } from './query-builders/delete.ts';
 import type { MySqlInsertConfig } from './query-builders/insert.ts';
 import type {
@@ -245,7 +246,15 @@ export class MySqlDialect {
 					chunk.push(sql` as ${sql.identifier(field.fieldAlias)}`);
 				}
 			} else if (is(field, Column)) {
-				if (isSingleTable) {
+				const selectSQL = is(field, MySqlCustomColumn)
+					? field.getSelectSQL(
+						isSingleTable ? sql`${sql.identifier(this.casing.getColumnCasing(field))}` : sql`${field}`,
+					)
+					: undefined;
+
+				if (selectSQL !== undefined) {
+					chunk.push(sql`${selectSQL} as ${sql.identifier(this.casing.getColumnCasing(field))}`);
+				} else if (isSingleTable) {
 					chunk.push(sql.identifier(this.casing.getColumnCasing(field)));
 				} else {
 					chunk.push(field);
@@ -898,6 +907,8 @@ export class MySqlDialect {
 							? sql`${sql.identifier(`${tableAlias}_${tsKey}`)}.${sql.identifier('data')}`
 							: is(field, SQL.Aliased)
 							? field.sql
+							: is(field, MySqlCustomColumn)
+							? field.getSelectSQL(sql`${field}`) ?? field
 							: field
 					),
 					sql`, `,
@@ -1236,7 +1247,10 @@ export class MySqlDialect {
 			let field = sql`json_array(${
 				sql.join(
 					selection.map(({ field }) =>
-						is(field, MySqlColumn)
+						is(field, MySqlCustomColumn)
+							? field.getSelectSQL(sql`${sql.identifier(this.casing.getColumnCasing(field))}`)
+								?? sql.identifier(this.casing.getColumnCasing(field))
+							: is(field, MySqlColumn)
 							? sql.identifier(this.casing.getColumnCasing(field))
 							: is(field, SQL.Aliased)
 							? field.sql
